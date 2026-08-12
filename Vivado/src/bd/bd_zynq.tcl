@@ -84,11 +84,11 @@ set_property -dict [list CONFIG.PHY_TYPE {RGMII}] [get_bd_cells axi_ethernet_1]
 set_property -dict [list CONFIG.PHY_TYPE {RGMII}] [get_bd_cells axi_ethernet_2]
 set_property -dict [list CONFIG.PHY_TYPE {RGMII}] [get_bd_cells axi_ethernet_3]
 
-# Configure all AXI Ethernet for no frame filter and no statistics counter (saves LUTs)
-set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {false}] [get_bd_cells axi_ethernet_0]
-set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {false}] [get_bd_cells axi_ethernet_1]
-set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {false}] [get_bd_cells axi_ethernet_2]
-set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {false}] [get_bd_cells axi_ethernet_3]
+# Configure all AXI Ethernet for no frame filter, but enable statistics counter
+set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {true}] [get_bd_cells axi_ethernet_0]
+set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {true}] [get_bd_cells axi_ethernet_1]
+set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {true}] [get_bd_cells axi_ethernet_2]
+set_property -dict [list CONFIG.Frame_Filter {false} CONFIG.Statistics_Counters {true}] [get_bd_cells axi_ethernet_3]
 
 # Make AXI Ethernet ports external: MDIO, RGMII and RESET
 # MDIO
@@ -174,7 +174,8 @@ create_bd_cell -type ip -vlnv opsero.com:hls:eth_traffic_gen:1.0 eth_traffic_gen
 # Connect the generators to the MACs
 
 # GEN0 -> MAC0
-connect_bd_intf_net [get_bd_intf_pins eth_traffic_gen_0/m_axis_txd] [get_bd_intf_pins axi_ethernet_0/s_axis_txd]
+# Named net: tapped by frame_counter_0/tx0 below
+connect_bd_intf_net -intf_net mac0_txd [get_bd_intf_pins eth_traffic_gen_0/m_axis_txd] [get_bd_intf_pins axi_ethernet_0/s_axis_txd]
 connect_bd_intf_net [get_bd_intf_pins eth_traffic_gen_0/m_axis_txc] [get_bd_intf_pins axi_ethernet_0/s_axis_txc]
 # GEN1 -> MAC1
 connect_bd_intf_net [get_bd_intf_pins eth_traffic_gen_1/m_axis_txd] [get_bd_intf_pins axi_ethernet_1/s_axis_txd]
@@ -190,7 +191,8 @@ connect_bd_intf_net [get_bd_intf_pins eth_traffic_gen_3/m_axis_txc] [get_bd_intf
 connect_bd_intf_net [get_bd_intf_pins axi_ethernet_0/m_axis_rxd] [get_bd_intf_pins eth_traffic_gen_1/s_axis_rxd]
 connect_bd_intf_net [get_bd_intf_pins axi_ethernet_0/m_axis_rxs] [get_bd_intf_pins eth_traffic_gen_1/s_axis_rxs]
 # GEN0 <- MAC1
-connect_bd_intf_net [get_bd_intf_pins axi_ethernet_1/m_axis_rxd] [get_bd_intf_pins eth_traffic_gen_0/s_axis_rxd]
+# Named net: tapped by frame_counter_0/tx1 below
+connect_bd_intf_net -intf_net mac1_rxd [get_bd_intf_pins axi_ethernet_1/m_axis_rxd] [get_bd_intf_pins eth_traffic_gen_0/s_axis_rxd]
 connect_bd_intf_net [get_bd_intf_pins axi_ethernet_1/m_axis_rxs] [get_bd_intf_pins eth_traffic_gen_0/s_axis_rxs]
 # GEN3 <- MAC2
 connect_bd_intf_net [get_bd_intf_pins axi_ethernet_2/m_axis_rxd] [get_bd_intf_pins eth_traffic_gen_3/s_axis_rxd]
@@ -213,6 +215,47 @@ apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config {Master "/processing_s
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config {Master "/processing_system7_0/M_AXI_GP0" Clk "Auto" }  [get_bd_intf_pins eth_traffic_gen_1/s_axi_p0]
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config {Master "/processing_system7_0/M_AXI_GP0" Clk "Auto" }  [get_bd_intf_pins eth_traffic_gen_2/s_axi_p0]
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config {Master "/processing_system7_0/M_AXI_GP0" Clk "Auto" }  [get_bd_intf_pins eth_traffic_gen_3/s_axi_p0]
+
+# Hardware frame counter
+# ----------------------
+# Latches all frame counters on a single clock edge, so a sent-vs-received
+# comparison describes exactly the same interval. Software reads of the MAC
+# statistics registers take ~1us, long enough for a frame boundary to fall
+# between two reads and produce a spurious +/-1 difference.
+#
+# The tx0/tx1 ports are AXI-Stream *monitor* interfaces: they attach to an
+# existing interface net without breaking it, so no stream is rerouted.
+#
+# Bring-up configuration - 2 taps on one cable pair (ports 0 and 1 are cabled
+# together, so GEN0 transmits on MAC0 and receives back on MAC1):
+#   tx0 = frames sent     on port 0  (GEN0 -> MAC0)
+#   tx1 = frames received on port 1  (MAC1 -> GEN0)
+# These two counters should read identical values.
+
+create_bd_cell -type ip -vlnv xilinx.com:user:frame_counter:1.0 frame_counter_0
+
+# Clock and reset first: attaching a monitor triggers a clock-domain check,
+# so aclk has to be known before the taps are connected.
+connect_bd_net -net [get_bd_nets processing_system7_0_FCLK_CLK0] [get_bd_pins frame_counter_0/aclk] [get_bd_pins processing_system7_0/FCLK_CLK0]
+connect_bd_net -net [get_bd_nets rst_ps7_0_100M_peripheral_aresetn] [get_bd_pins frame_counter_0/aresetn] [get_bd_pins rst_ps7_0_100M/peripheral_aresetn]
+
+# Attach the monitors. A monitor joins an existing interface net by naming that
+# net with -intf_net AND giving one of its existing endpoint pins; passing the
+# monitor pin alone fails with "BD 17-3926".
+connect_bd_intf_net -intf_net mac0_txd [get_bd_intf_pins frame_counter_0/tx0] [get_bd_intf_pins axi_ethernet_0/s_axis_txd]
+connect_bd_intf_net -intf_net mac1_rxd [get_bd_intf_pins frame_counter_0/tx1] [get_bd_intf_pins axi_ethernet_1/m_axis_rxd]
+
+apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config {Master "/processing_system7_0/M_AXI_GP0" Clk "Auto" }  [get_bd_intf_pins frame_counter_0/s_axi]
+
+# The IP is packaged with a 4GB address block, which will not fit in the GP0
+# window. The register file is 32 words, so clamp it to the 4K minimum. Guarded
+# because an empty get_bd_addr_segs would abort the whole block design build.
+set fc_seg [get_bd_addr_segs -quiet {processing_system7_0/Data/SEG_frame_counter_0_reg0}]
+if {$fc_seg ne ""} {
+  set_property range 4K $fc_seg
+} else {
+  puts "WARNING: frame_counter_0 address segment not found, range left at default"
+}
 
 # Connect the AXI streaming clocks
 
