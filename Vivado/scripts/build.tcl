@@ -143,15 +143,10 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
   create_fileset -srcset sources_1
 }
 
-# Set IP repository paths. The first points at the target's own generated-IP
-# directory; Vivado scans it recursively and finds the packaged component inside.
-# The second holds the hand-packaged IP that lives in this repo.
+# Set IP repository paths. Point at the target's own generated-IP directory;
+# Vivado scans it recursively and finds the packaged component inside.
 set obj [get_filesets sources_1]
-set_property "ip_repo_paths" [list \
-  [file normalize "$origin_dir/../HLS/eth_traffic_gen/${target}"] \
-  [file normalize "$origin_dir/src/ip"] \
-] $obj
-update_ip_catalog -rebuild
+set_property "ip_repo_paths" "[file normalize "$origin_dir/../HLS/eth_traffic_gen/${target}"]" $obj
 
 # Set 'sources_1' fileset properties
 set obj [get_filesets sources_1]
@@ -289,4 +284,3 @@ close_bd_design [current_bd_design]
 open_bd_design [get_files ${block_name}.bd]
 validate_bd_design -force
 save_bd_design
-
