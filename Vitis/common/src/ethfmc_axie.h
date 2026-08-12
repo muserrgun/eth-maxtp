@@ -80,11 +80,12 @@ extern "C" {
 #define PHY_88E1111_RGMII_RX_CLOCK_DELAYED_MASK	0x0080
 
 
-unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp);
-unsigned EthFMC_Phy_Setup (XAxiEthernet *xaxiemacp);
 XAxiEthernet_Config *EthFMC_xaxiemac_lookup_config(unsigned mac_base);
 XAxiEthernet *EthFMC_init_axiemac(unsigned mac_address,unsigned char *mac_eth_addr);
-int EthFMC_start_axiemac(XAxiEthernet *axi_ethernet);
+void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp);
+unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp);
+void EthFMC_set_mac_speed(XAxiEthernet *axi_ethernet, unsigned link_speed);
+int EthFMC_start_mac(XAxiEthernet *axi_ethernet);
 
 #ifdef __cplusplus
 }

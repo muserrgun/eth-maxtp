@@ -22,15 +22,28 @@
 
 static void __attribute__ ((noinline)) AxiEthernetUtilPhyDelay(unsigned int Seconds);
 
-unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
+/* ----------------------------------------------------------------------
+ * Autonegotiation is split into two halves so that all four ports can be
+ * negotiated concurrently instead of one after another:
+ *
+ *   EthFMC_phy_start_autoneg()  configures the PHY and kicks off
+ *                               negotiation, then returns immediately
+ *   EthFMC_phy_wait_autoneg()   blocks until that PHY has finished and
+ *                               reports the negotiated link speed
+ *
+ * Call the first on every port, then the second on every port. The PHYs
+ * negotiate in parallel in hardware, so the total wait becomes the longest
+ * single negotiation rather than the sum of all four. Resetting all four
+ * PHYs at once also avoids the cascade where resetting one PHY drops the
+ * link of the port it is cabled to, forcing that port to renegotiate.
+ * ---------------------------------------------------------------------- */
+
+void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp)
 {
-	u16 temp;
 	u32 phy_addr = 0;
 	u16 phy_identifier;
 	u16 phy_model;
 	u16 control;
-	u16 status;
-	u16 partner_capabilities;
 
 	/* Get the PHY Identifier and Model number */
 	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, 2, &phy_identifier);
@@ -43,7 +56,6 @@ unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
 	/* The PHY model for 88E1510 is 0x01D0 */
 	if(phy_model != 0x01D0)
 		xil_printf("PHY model is NOT 88E1510: 0x%04X\n\r",phy_model);
-	xil_printf("Starting PHY autonegotiation\r\n");
 
 	/* RGMII with both TX and RX internal delays enabled (the default for 88E1510)
 	   Note that the Vivado designs for "max throughput" example designs all contain a
@@ -95,6 +107,19 @@ unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
 	control |= IEEE_CTRL_RESET_MASK;
 	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
+	/* Return without waiting - the caller kicks off the other ports next,
+	   then collects every result with EthFMC_phy_wait_autoneg(). */
+}
+
+unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp)
+{
+	u16 temp;
+	u32 phy_addr = 0;
+	u16 control;
+	u16 status;
+	u16 partner_capabilities;
+
+	/* Wait for the software reset issued by _start_autoneg() to clear */
 	while (1) {
 		XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
 		if (control & IEEE_CTRL_RESET_MASK)
@@ -102,7 +127,6 @@ unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
 		else
 			break;
 	}
-	xil_printf("Waiting for PHY to complete autonegotiation...\r\n");
 
 	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 	while ( !(status & IEEE_STAT_AUTONEGOTIATE_COMPLETE) ) {
@@ -116,8 +140,6 @@ unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
 																&status);
 		}
 
-	xil_printf("Autonegotiation complete\r\n");
-
 	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_SPECIFIC_STATUS_REG, &partner_capabilities);
 
 	if ( ((partner_capabilities >> 14) & 3) == 2)/* 1000Mbps */
@@ -126,38 +148,6 @@ unsigned EthFMC_get_IEEE_phy_speed(XAxiEthernet *xaxiemacp)
 		return 100;
 	else					/* 10Mbps */
 		return 10;
-}
-
-unsigned EthFMC_Phy_Setup (XAxiEthernet *xaxiemacp)
-{
-	unsigned link_speed = 1000;
-
-	if (XAxiEthernet_GetPhysicalInterface(xaxiemacp) ==
-						XAE_PHY_TYPE_RGMII_1_3) {
-		; /* Add PHY initialization code for RGMII 1.3 */
-	} else if (XAxiEthernet_GetPhysicalInterface(xaxiemacp) ==
-						XAE_PHY_TYPE_RGMII_2_0) {
-		; /* Add PHY initialization code for RGMII 2.0 */
-	} else if (XAxiEthernet_GetPhysicalInterface(xaxiemacp) ==
-						XAE_PHY_TYPE_SGMII) {
-#ifdef  CONFIG_LINKSPEED_AUTODETECT
-		u32 phy_wr_data = IEEE_CTRL_AUTONEGOTIATE_ENABLE |
-					IEEE_CTRL_LINKSPEED_1000M;
-		phy_wr_data &= (~PHY_R0_ISOLATE);
-
-		XAxiEthernet_PhyWrite(xaxiemacp,
-				XPAR_AXI_ETHERNET_0_PHYADDR,
-				IEEE_CONTROL_REG_OFFSET,
-				phy_wr_data);
-#endif
-	} else if (XAxiEthernet_GetPhysicalInterface(xaxiemacp) ==
-						XAE_PHY_TYPE_1000BASE_X) {
-		; /* Add PHY initialization code for 1000 Base-X */
-	}
-/* set PHY <--> MAC data clock */
-	link_speed = EthFMC_get_IEEE_phy_speed(xaxiemacp);
-	xil_printf("Auto-negotiated link speed: %d Mbps\r\n", link_speed);
-	return link_speed;
 }
 
 XAxiEthernet_Config *EthFMC_xaxiemac_lookup_config(unsigned mac_base)
@@ -208,7 +198,7 @@ XAxiEthernet *EthFMC_init_axiemac(unsigned mac_address,unsigned char *mac_eth_ad
 	// Disable FCS strip
 	options &= ~XAE_FCS_STRIP_OPTION;
 	// Disable FCS insert (we have included it in the frame)
-	options &= ~XAE_FCS_INSERT_OPTION;
+	options&= ~XAE_FCS_INSERT_OPTION;
 	//options |= XAE_FCS_INSERT_OPTION;
 	options |= XAE_MULTICAST_OPTION;
 	// Using promiscuous option to disable mac address filtering
@@ -223,47 +213,20 @@ XAxiEthernet *EthFMC_init_axiemac(unsigned mac_address,unsigned char *mac_eth_ad
   return axi_ethernet;
 }
 
-int EthFMC_start_axiemac(XAxiEthernet *axi_ethernet)
+// Phase 1: PHY setup only — MAC stays quiet
+/* Phase 1b helper: apply the negotiated speed to the MAC. Kept separate
+   from the PHY wait so all four ports can be waited on first. */
+void EthFMC_set_mac_speed(XAxiEthernet *axi_ethernet, unsigned link_speed)
 {
-	unsigned link_speed = 1000;
-
-	link_speed = EthFMC_Phy_Setup(axi_ethernet);
     XAxiEthernet_SetOperatingSpeed(axi_ethernet, link_speed);
+}
 
-	/* Setting the operating speed of the MAC needs a delay. */
-	{
-		volatile int wait;
-		for (wait=0; wait < 100000; wait++);
-		for (wait=0; wait < 100000; wait++);
-	}
-
-#ifdef NOTNOW
-        /* in a soft temac implementation, we need to explicitly make sure that
-         * the RX DCM has been locked. See xps_ll_temac manual for details.
-         * This bit is guaranteed to be 1 for hard temac's
-         */
-        lock_message_printed = 0;
-        while (!(XAxiEthernet_ReadReg(axi_ethernet->Config.BaseAddress, XAE_IS_OFFSET)
-                    & XAE_INT_RXDCMLOCK_MASK)) {
-                int first = 1;
-                if (first) {
-                        print("Waiting for RX DCM to lock..");
-                        first = 0;
-                        lock_message_printed = 1;
-                }
-        }
-
-        if (lock_message_printed)
-                print("RX DCM locked.\r\n");
-#endif
-
-	/* start the temac */
-    XAxiEthernet_Start(axi_ethernet);
-
-	/* enable MAC interrupts */
+// Phase 3: turn the MAC on
+int EthFMC_start_mac(XAxiEthernet *axi_ethernet)
+{
+	XAxiEthernet_SetOptions(axi_ethernet, XAE_TRANSMITTER_ENABLE_OPTION);
 	XAxiEthernet_IntEnable(axi_ethernet, XAE_INT_RECV_ERROR_MASK);
-
-  return 0;
+	return 0;
 }
 
 
