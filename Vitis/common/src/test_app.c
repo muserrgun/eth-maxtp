@@ -4,48 +4,22 @@
  */
 
 /*
- * test_app.c: Test application for Ethernet FMC
+ * test_app.c: Passive network TAP test
  *
- * This application sets up the AXI Ethernet cores and the
- * Marvell PHYs on the Ethernet FMC to autonegotiate the
- * link speed and disable MAC address filtering.
+ * Generates Ethernet traffic to check that a passive network TAP
+ * passes and mirrors every frame without losing any.
  *
- * The main loop does the following:
- *  - force a bit error into a transmitted frame on all ports
- *  - poll the rejected frame interrupt flag for about 1 second
- *  - increment counters when dropped frames are detected
- *  - display the value of the counters
+ * Port wiring:
+ *   P0 -> TAP port A     P2 <- TAP monitor 1 (A->B)
+ *   P1 -> TAP port B     P3 <- TAP monitor 2 (B->A)
  *
- * The console will display the dropped frame 
- * counts for all ports about once a second. The dropped frame
- * values should be incrementing by one for each reading.
- * In normal operation, the dropped frame counter for each
- * port should be the same which indicates that there have
- * been no dropped packets besides those in which an error was
- * forced by the Ethernet Traffic Generator.
+ * Each round stops the traffic and reads the MAC frame counters,
+ * runs traffic for a while, then stops and reads them again. With
+ * the traffic stopped no frame is left on the wire, so the sent and
+ * received counts can be compared exactly.
  *
- * Example (normal) output:
- *
- * Dropped frames (P0,P1,P2,P3):    1     1     1     1
- * Dropped frames (P0,P1,P2,P3):    2     2     2     2
- * Dropped frames (P0,P1,P2,P3):    3     3     3     3
- * Dropped frames (P0,P1,P2,P3):    4     4     4     4
- * 
- * 
- * Dropped frames (P0,P1,P2,P3):    5     5     5     5
- * Dropped frames (P0,P1,P2,P3):    6     6     6     6
- * Dropped frames (P0,P1,P2,P3):    7     7     7     7
- *
- * Example output where a frame was lost on port 2:
- *
- * Dropped frames (P0,P1,P2,P3):    1     1     1     1
- * Dropped frames (P0,P1,P2,P3):    2     2     2     2
- * Dropped frames (P0,P1,P2,P3):    3     3     4     3
- * Dropped frames (P0,P1,P2,P3):    4     4     5     4
- * Dropped frames (P0,P1,P2,P3):    5     5     6     5
- * Dropped frames (P0,P1,P2,P3):    6     6     7     6
- * Dropped frames (P0,P1,P2,P3):    7     7     8     7
- *
+ * The test passes when each port received exactly as many frames as
+ * were sent to it.
  */
 
 #include "xparameters.h"
@@ -53,22 +27,6 @@
 #include "xil_types.h"
 #include "ethfmc_axie.h"
 #include "xeth_traffic_gen.h"
-
-/*
- * The following DEFINE sets the number of words
- * to put in the payload of the Ethernet packets to send.
- * The payload is filled with random data and the first 2
- * bytes are 0x00. The actual payload size in bytes will
- * be: (PAYLOAD_WORD_SIZE * 4) + 2
- *
- * Maximum value is 374 (1496 bytes + 2 pad bytes)
- * Minimum value is 12 (48 bytes + 2 pad bytes)
- *
- */
-
-#define PAYLOAD_WORD_SIZE  374
-
-#define PAYLOAD_BYTE_SIZE	((PAYLOAD_WORD_SIZE*4)+2)
 
 // Ethernet traffic generators and pointers to them
 XEth_traffic_gen eth_pkt_gen[XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES];
@@ -78,17 +36,18 @@ XAxiEthernet *axi_ethernet[4];
 int main()
 {
 	int Status;
-	u32 reg;
 	volatile u32 i;
-	volatile u32 tx_frames[4], rx_frames[4], dropped_frames[4];
+	volatile u32 tx_frames[4], rx_frames[4];
 	volatile u32 tx_base[4], rx_base[4];
 
 	volatile u32 s, p;
 	unsigned link_speed[4];
-	// Frame sizes to sweep, in payload words. Frame bytes = words*4 + 20
+	/* Frame sizes to sweep, in payload words. Frame bytes = words*4 + 20.
+	 * Valid range is 12 (48 bytes + 2 pad) to 374 (1496 bytes + 2 pad). */
 	const u32 sweep_words[] = {374};
 	#define NUM_SWEEP (sizeof(sweep_words)/sizeof(sweep_words[0]))
-	#define ERROR_INJECT_TEST 0
+	// How long traffic runs per measurement, in seconds
+	#define WINDOW_SECONDS 10
 
 	xil_printf("\n\r");
 	xil_printf("##########################################\n\r");
@@ -132,11 +91,6 @@ int main()
 	  XEth_traffic_gen_Set_src_mac_hi(&(eth_pkt_gen[i]),0xFFFF);
 	}
 
-	// Set packet payload length
-	for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
-		XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]),PAYLOAD_WORD_SIZE);
-	}
-
 	// Reset force error
 	for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
 		XEth_traffic_gen_Set_force_error(&(eth_pkt_gen[i]),0);
@@ -154,7 +108,6 @@ int main()
 	// Phase 1a: kick off all four PHYs
 	for(i = 0; i < 4; i++){
 		EthFMC_phy_start_autoneg(axi_ethernet[i]);
-		dropped_frames[i] = 0;
 	}
 
 	// Phase 1b: collect results
@@ -169,66 +122,40 @@ int main()
 		EthFMC_start_mac(axi_ethernet[i]);
 	}
 
-	// Reset the reject frame interrupt flags
-	XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_0_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-	XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_1_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-	XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_2_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-	XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_3_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-
-
-	// Let all links finish renegotiating after the last PHY reset,
-	// then take a baseline so the display starts from zero.
+	// Let all links finish renegotiating after the last PHY reset
 	sleep(2);
-	for(i = 0; i < 4; i++){
-		tx_base[i] = XAxiEthernet_ReadReg(eth_mac_baseaddr[i], XAE_TXFL_OFFSET);
-		rx_base[i] = XAxiEthernet_ReadReg(eth_mac_baseaddr[i], XAE_RXFL_OFFSET);
-	}
 
 	while (1) {
 		
 		for(s = 0; s < NUM_SWEEP; s++){
 
-			// Set the new frame size on all generators
+
+			// Baseline with the links idle
+			for(p = 0; p < 4; p++){
+				tx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_TXFL_OFFSET);
+				rx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_RXFL_OFFSET);
+			}
+
+			// Open the measurement window: set the frame size to start traffic
 			for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
 				XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), sweep_words[s]);
 			}
 
-			// Let the size change flush through, then re-baseline for this size
-			sleep(1);
-			for(p = 0; p < 4; p++){
-				tx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_TXFL_OFFSET);
-				rx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_RXFL_OFFSET);
-				dropped_frames[p] = 0;
-				XAxiEthernet_WriteReg(eth_mac_baseaddr[p], XAE_IS_OFFSET, XAE_INT_RXRJECT_MASK);
-			}
-		
 
-			/* Poll for dropped packets — this loop is also the measurement
-			* window; the counters are read once it completes. All four
-			* ports are polled every pass so no port goes unwatched. */
-			for(i=0; i<1000000; i++){
-				reg = XAxiEthernet_ReadReg(XPAR_AXI_ETHERNET_0_BASEADDR,XAE_IS_OFFSET);
-				if((reg & XAE_INT_RXRJECT_MASK)){
-					XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_0_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-					dropped_frames[0]++;
-				}
-				reg = XAxiEthernet_ReadReg(XPAR_AXI_ETHERNET_1_BASEADDR,XAE_IS_OFFSET);
-				if((reg & XAE_INT_RXRJECT_MASK)){
-					XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_1_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-					dropped_frames[1]++;
-				}
-				reg = XAxiEthernet_ReadReg(XPAR_AXI_ETHERNET_2_BASEADDR,XAE_IS_OFFSET);
-				if((reg & XAE_INT_RXRJECT_MASK)){
-					XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_2_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-					dropped_frames[2]++;
-				}
-				reg = XAxiEthernet_ReadReg(XPAR_AXI_ETHERNET_3_BASEADDR,XAE_IS_OFFSET);
-				if((reg & XAE_INT_RXRJECT_MASK)){
-					XAxiEthernet_WriteReg(XPAR_AXI_ETHERNET_3_BASEADDR,XAE_IS_OFFSET,XAE_INT_RXRJECT_MASK);
-					dropped_frames[3]++;
-				}
-			}
+			/* The measurement window. Frames are generated and counted entirely
+			 * in hardware, so the CPU has nothing to do while it runs. A longer
+			 * window tests more frames: at 1 Gbps a 1516 byte frame takes about
+			 * 12.3 us, so 10 seconds is roughly 814000 frames per port. */
+			sleep(WINDOW_SECONDS);
 
+
+		/* Stop the traffic and let it settle before reading. Reading
+		 * while traffic runs would count frames at tx that have not reached
+		 * rx yet, which looks like loss but is not. */
+		for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
+			XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), 0);
+		}
+		sleep(1);
 
 		// Read the MAC statistics counters
 		for(i = 0; i < 4; i++){
@@ -250,13 +177,18 @@ int main()
 					tx_frames[0], rx_frames[2], rx_frames[2] - tx_frames[0]);
 		xil_printf("B->A mirror  %10d %10d %10d\n\r",
 					tx_frames[1], rx_frames[3], rx_frames[3] - tx_frames[1]);
-		xil_printf("Dropped: P0=%d P1=%d P2=%d P3=%d\n\r\n\r",
-					dropped_frames[0], dropped_frames[1], dropped_frames[2], dropped_frames[3]);
+
+		/* Traffic is stopped, so every frame sent has either arrived or been
+		 * lost. Any nonzero diff is real loss. */
+		if((rx_frames[1] == tx_frames[0]) && (rx_frames[0] == tx_frames[1]) &&
+		   (rx_frames[2] == tx_frames[0]) && (rx_frames[3] == tx_frames[1])){
+			xil_printf("RESULT: PASS - all counts match\n\r\n\r");
+		} else {
+			xil_printf("RESULT: FAIL - frame loss detected\n\r\n\r");
+		}
 
 		}
 	}
 	
 	return 0;
 }
-
-
