@@ -1,0 +1,4 @@
+[submodule "Vivado/src/ip/eth_port_1g"]
+	path = Vivado/src/ip/eth_port_1g
+	url = https://github.com/muserrgun/eth-port-1g.git
+	branch = main
