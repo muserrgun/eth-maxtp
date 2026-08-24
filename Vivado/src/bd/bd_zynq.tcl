@@ -154,6 +154,56 @@ connect_bd_intf_net [get_bd_intf_ports ref_clk] [get_bd_intf_pins util_ds_buf_0/
 
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins axi_ethernet_2/gtx_clk]
 
+# Clocking Wizards for eth_port_1g
+#
+# These replace the shared clocking that axi_ethernet_0 and axi_ethernet_2 give to
+# ports 1 and 3 via gtx_clk_out / gtx_clk90_out. One wizard per 125MHz source, each
+# producing 0 and 90 degrees for its two ports:
+#
+#   clk_wiz_0  <- util_ds_buf_0/IBUF_OUT (Ethernet FMC LVDS)  -> ports 0, 1
+#   clk_wiz_1  <- processing_system7_0/FCLK_CLK1              -> ports 2, 3
+#
+# PRIM_SOURCE is No_buffer because both inputs are already buffered before they get
+# here: util_ds_buf does the IBUFDS, and FCLK_CLK1 arrives on a BUFG.
+# USE_RESET is false because both input clocks are free running, so the MMCM needs
+# no reset and we avoid an unconnected input.
+
+create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_0
+set_property -dict [list CONFIG.PRIM_SOURCE {No_buffer} \
+CONFIG.PRIM_IN_FREQ {125.000} \
+CONFIG.NUM_OUT_CLKS {2} \
+CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {125.000} \
+CONFIG.CLKOUT2_USED {true} \
+CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {125.000} \
+CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
+CONFIG.USE_RESET {false}] [get_bd_cells clk_wiz_0]
+connect_bd_net [get_bd_pins util_ds_buf_0/IBUF_OUT] [get_bd_pins clk_wiz_0/clk_in1]
+
+create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_1
+set_property -dict [list CONFIG.PRIM_SOURCE {No_buffer} \
+CONFIG.PRIM_IN_FREQ {125.000} \
+CONFIG.NUM_OUT_CLKS {2} \
+CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {125.000} \
+CONFIG.CLKOUT2_USED {true} \
+CONFIG.CLKOUT2_REQUESTED_OUT_FREQ {125.000} \
+CONFIG.CLKOUT2_REQUESTED_PHASE {90.000} \
+CONFIG.USE_RESET {false}] [get_bd_cells clk_wiz_1]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK1] [get_bd_pins clk_wiz_1/clk_in1]
+
+# Invert 'locked' to make the active-high gtx_rst for each wizard's two ports.
+# eth_port_1g takes gtx_rst active HIGH, so 'locked' must not drive it directly.
+# util_vector_logic_0 belongs to clk_wiz_0 (ports 0,1), _1 to clk_wiz_1 (ports 2,3).
+
+create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic util_vector_logic_0
+set_property -dict [list CONFIG.C_OPERATION {not} \
+CONFIG.C_SIZE {1}] [get_bd_cells util_vector_logic_0]
+connect_bd_net [get_bd_pins clk_wiz_0/locked] [get_bd_pins util_vector_logic_0/Op1]
+
+create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic util_vector_logic_1
+set_property -dict [list CONFIG.C_OPERATION {not} \
+CONFIG.C_SIZE {1}] [get_bd_cells util_vector_logic_1]
+connect_bd_net [get_bd_pins clk_wiz_1/locked] [get_bd_pins util_vector_logic_1/Op1]
+
 # Create Ethernet FMC reference clock output enable and frequency select
 
 create_bd_cell -type inline_hdl -vlnv xilinx.com:inline_hdl:ilconstant:1.0 ref_clk_oe
