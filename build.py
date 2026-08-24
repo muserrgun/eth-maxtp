@@ -461,6 +461,10 @@ def stage_ip(ctx: Context):
 def stage_project(ctx: Context):
     if ctx.xpr.is_file():
         return "skipped (project exists)"
+    probe = ctx.viv_dir / "src" / "ip" / "eth_port_1g" / "component.xml"
+    if not probe.is_file():
+        fail("eth_port_1g IP is missing or not packaged.\n"
+             "  Run: git submodule update --init --recursive")
     if has_ip_flow(ctx):
         stage_ip(ctx)
     check_versal_path(ctx)

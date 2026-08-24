@@ -145,8 +145,27 @@ if {[string equal [get_filesets -quiet sources_1] ""]} {
 
 # Set IP repository paths. Point at the target's own generated-IP directory;
 # Vivado scans it recursively and finds the packaged component inside.
+set eth_port_1g_dir [file normalize "$origin_dir/src/ip/eth_port_1g"]
+
+if {![file exists [file join $eth_port_1g_dir component.xml]]} {
+  puts "###############################"
+  puts "### Failed to build project ###"
+  puts "###############################"
+  puts "The eth_port_1g IP was not found at:"
+  puts "  $eth_port_1g_dir"
+  puts "The submodule is missing, or checked out at a commit before the IP"
+  puts "was packaged. Run:"
+  puts "  git submodule update --init --recursive"
+  return
+}
+
 set obj [get_filesets sources_1]
-set_property "ip_repo_paths" "[file normalize "$origin_dir/../HLS/eth_traffic_gen/${target}"]" $obj
+set_property "ip_repo_paths" [list \
+  [file normalize "$origin_dir/../HLS/eth_traffic_gen/${target}"] \
+  $eth_port_1g_dir \
+] $obj
+
+update_ip_catalog -rebuild
 
 # Set 'sources_1' fileset properties
 set obj [get_filesets sources_1]
