@@ -17,6 +17,34 @@ create_clock -period 8.000 -name rgmii_port_2_rxc [get_ports rgmii_port_2_rxc]
 create_clock -period 8.000 -name rgmii_port_3_rxc [get_ports rgmii_port_3_rxc]
 
 #
+# RGMII transmit clocks
+#
+# rgmii_port_N_txc is generated inside the FPGA: rgmii_phy_if forwards it out
+# through an ODDR clocked by clk_wiz clk_out2, the 90 degree output. The tools
+# do not know it is a clock until told, and set_output_delay needs it to exist.
+#
+# The 90 degree phase is inherited from clk_out2, which is what puts the edge in
+# the centre of the TX data eye at the PHY - hence the PHY's own TX delay stays
+# disabled (IEEE_RGMII_TX_CLOCK_DELAYED_MASK cleared, ethfmc_axie.c:71).
+#
+
+create_generated_clock -name rgmii_port_0_txc -divide_by 1 \
+    -source [get_pins -hier -filter {NAME =~ */eth_port_1g_0/*/clk_oddr_inst/*/C}] \
+    [get_ports rgmii_port_0_txc]
+
+create_generated_clock -name rgmii_port_1_txc -divide_by 1 \
+    -source [get_pins -hier -filter {NAME =~ */eth_port_1g_1/*/clk_oddr_inst/*/C}] \
+    [get_ports rgmii_port_1_txc]
+
+create_generated_clock -name rgmii_port_2_txc -divide_by 1 \
+    -source [get_pins -hier -filter {NAME =~ */eth_port_1g_2/*/clk_oddr_inst/*/C}] \
+    [get_ports rgmii_port_2_txc]
+
+create_generated_clock -name rgmii_port_3_txc -divide_by 1 \
+    -source [get_pins -hier -filter {NAME =~ */eth_port_1g_3/*/clk_oddr_inst/*/C}] \
+    [get_ports rgmii_port_3_txc]
+
+#
 # RGMII receive data
 #
 # Where these numbers come from
@@ -112,3 +140,36 @@ set_clock_groups -asynchronous \
 # MDIO runs at 1.56 MHz so it is not timing critical, but it should be false
 # pathed explicitly so "safe" is distinguishable from "forgotten".
 #
+
+set_output_delay -clock rgmii_port_0_txc -max  1.0 [get_ports {rgmii_port_0_td[*] rgmii_port_0_tx_ctl}]
+set_output_delay -clock rgmii_port_0_txc -min -0.8 [get_ports {rgmii_port_0_td[*] rgmii_port_0_tx_ctl}]
+set_output_delay -clock rgmii_port_0_txc -max  1.0 [get_ports {rgmii_port_0_td[*] rgmii_port_0_tx_ctl}] -clock_fall -add_delay
+set_output_delay -clock rgmii_port_0_txc -min -0.8 [get_ports {rgmii_port_0_td[*] rgmii_port_0_tx_ctl}] -clock_fall -add_delay
+
+set_output_delay -clock rgmii_port_1_txc -max  1.0 [get_ports {rgmii_port_1_td[*] rgmii_port_1_tx_ctl}]
+set_output_delay -clock rgmii_port_1_txc -min -0.8 [get_ports {rgmii_port_1_td[*] rgmii_port_1_tx_ctl}]
+set_output_delay -clock rgmii_port_1_txc -max  1.0 [get_ports {rgmii_port_1_td[*] rgmii_port_1_tx_ctl}] -clock_fall -add_delay
+set_output_delay -clock rgmii_port_1_txc -min -0.8 [get_ports {rgmii_port_1_td[*] rgmii_port_1_tx_ctl}] -clock_fall -add_delay
+
+set_output_delay -clock rgmii_port_2_txc -max  1.0 [get_ports {rgmii_port_2_td[*] rgmii_port_2_tx_ctl}]
+set_output_delay -clock rgmii_port_2_txc -min -0.8 [get_ports {rgmii_port_2_td[*] rgmii_port_2_tx_ctl}]
+set_output_delay -clock rgmii_port_2_txc -max  1.0 [get_ports {rgmii_port_2_td[*] rgmii_port_2_tx_ctl}] -clock_fall -add_delay
+set_output_delay -clock rgmii_port_2_txc -min -0.8 [get_ports {rgmii_port_2_td[*] rgmii_port_2_tx_ctl}] -clock_fall -add_delay
+
+set_output_delay -clock rgmii_port_3_txc -max  1.0 [get_ports {rgmii_port_3_td[*] rgmii_port_3_tx_ctl}]
+set_output_delay -clock rgmii_port_3_txc -min -0.8 [get_ports {rgmii_port_3_td[*] rgmii_port_3_tx_ctl}]
+set_output_delay -clock rgmii_port_3_txc -max  1.0 [get_ports {rgmii_port_3_td[*] rgmii_port_3_tx_ctl}] -clock_fall -add_delay
+set_output_delay -clock rgmii_port_3_txc -min -0.8 [get_ports {rgmii_port_3_td[*] rgmii_port_3_tx_ctl}] -clock_fall -add_delay
+
+
+#
+# Ports with no timing requirement
+#
+# MDIO runs at logic_clk/64 = 1.56 MHz and is software timed with a busy poll;
+# a full Clause 22 transaction takes ~61 us. The PHY resets and the FMC clock
+# enable/select are static levels from register bits.
+#
+set_false_path -to [get_ports {mdio_io_port_*_mdc mdio_io_port_*_mdio_io}]
+set_false_path -from [get_ports {mdio_io_port_*_mdio_io}]
+set_false_path -to [get_ports {reset_port_*}]
+set_false_path -to [get_ports {ref_clk_oe[*] ref_clk_fsel[*]}]
