@@ -121,7 +121,10 @@ if { $proj_board == "" } {
 set fpga_part [get_property PART_NAME [get_board_parts $proj_board]]
 set bd_script [lindex [dict get $target_dict $target] 2]
 set bd_tb_script [lindex [dict get $target_dict $target] 3]
-set rgmii_xdc [lindex [dict get $target_dict $target] 4]
+# Element 4 of the target dict used to name an RGMII constraints file
+# (rgmii-0123.xdc). It went away with the AXI Ethernet IP. The dict entry itself
+# is left alone because it sits inside the UPDATER block that config/update.py
+# regenerates; nothing reads it any more.
 
 # Set the reference directory for source file relative paths (by default the value is script directory path)
 set origin_dir "."
@@ -187,14 +190,49 @@ set file [file normalize $file]
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
 set_property "file_type" "XDC" $file_obj
 
-# Add/Import constrs file and set constrs file properties
-set file "[file normalize "$origin_dir/src/constraints/${rgmii_xdc}.xdc"]"
-set file_added [add_files -norecurse -fileset $obj $file]
-set file "$origin_dir/src/constraints/${rgmii_xdc}.xdc"
-set file [file normalize $file]
+# RGMII timing constraints for the eth_port_1g ports: create_clock on the four
+# receive clocks, the input delays, and the async clock groups.
+#
+# processing_order LATE because it references clk_fpga_0 / clk_fpga_1, which the
+# processing_system7 IP does not create until after the target XDC is parsed.
+# Referenced too early, get_clocks returns nothing and the constraint is dropped
+# with only a CRITICAL WARNING.
+set file [file normalize "$origin_dir/src/constraints/eth_port_1g_timing.xdc"]
+add_files -norecurse -fileset $obj $file
 set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
 set_property "file_type" "XDC" $file_obj
 set_property "processing_order" "LATE" $file_obj
+
+# Add the verilog-ethernet timing constraints that ship with eth_port_1g.
+#
+# These carry the CDC constraints for the async FIFOs, the MAC's clock crossings
+# and the RGMII TX clock forwarding path. Without them the 0 deg -> 90 deg
+# transfer into the clock ODDR is analysed as an ordinary synchronous path and
+# fails by ~0.4 ns on every port.
+#
+# file_type is TCL, NOT XDC. Each script wraps its whole body in a foreach over
+# get_cells, and foreach is not in the XDC command subset - declared as XDC the
+# body is skipped silently apart from one CRITICAL WARNING per file.
+#
+# Add ONE copy at top level, NOT scoped per instance: each script self-discovers
+# its targets via get_cells -hier -filter {ORIG_REF_NAME =~ ...} and handles all
+# four port instances in a single pass.
+foreach f {
+    verilog-ethernet/scripts/eth_mac_1g_rgmii.tcl
+    verilog-ethernet/scripts/eth_mac_fifo.tcl
+    verilog-ethernet/scripts/rgmii_phy_if.tcl
+    verilog-ethernet/lib/axis/scripts/axis_async_fifo.tcl
+} {
+  set file [file normalize "$origin_dir/src/ip/eth_port_1g/$f"]
+  if {![file exists $file]} {
+    puts "ERROR: eth_port_1g timing constraint not found: $file"
+    return
+  }
+  add_files -norecurse -fileset $obj $file
+  set file_obj [get_files -of_objects [get_filesets constrs_1] [list "*$file"]]
+  set_property "file_type" "TCL" $file_obj
+  set_property "processing_order" "LATE" $file_obj
+}
 
 # Set 'constrs_1' fileset properties
 set obj [get_filesets constrs_1]
