@@ -19,7 +19,7 @@
       "lanecfg": "rgmii-0123",
       "connector": "LPC",
       "group": "z7",
-      "ip_license": true,
+      "ip_license": false,
       "petalinux": false,
       "baremetal": true
     }
