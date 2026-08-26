@@ -31,7 +31,6 @@
 // Ethernet traffic generators and pointers to them
 XEth_traffic_gen eth_pkt_gen[XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES];
 
-XAxiEthernet *axi_ethernet[4];
 
 int main()
 {
@@ -44,7 +43,7 @@ int main()
 	unsigned link_speed[4];
 	/* Frame sizes to sweep, in payload words. Frame bytes = words*4 + 20.
 	 * Valid range is 12 (48 bytes + 2 pad) to 374 (1496 bytes + 2 pad). */
-	const u32 sweep_words[] = {374};
+	const u32 sweep_words[] = {373};   /* 374 -> 1520 bytes: the MAC appends its own FCS */
 	#define NUM_SWEEP (sizeof(sweep_words)/sizeof(sweep_words[0]))
 	// How long traffic runs per measurement, in seconds
 	#define WINDOW_SECONDS 10
@@ -67,12 +66,14 @@ int main()
 		XPAR_XETH_TRAFFIC_GEN_3_BASEADDR,
 	};
 
-	// Update 
-	UINTPTR eth_mac_baseaddr[] = {
-    XPAR_AXI_ETHERNET_0_BASEADDR,
-    XPAR_AXI_ETHERNET_1_BASEADDR,
-    XPAR_AXI_ETHERNET_2_BASEADDR,
-    XPAR_AXI_ETHERNET_3_BASEADDR,
+	/* The handle is the base address - eth_port_1g has no driver struct and
+	   no per-port software state. Replaces the XAxiEthernet * array and the
+	   separate eth_mac_baseaddr[] that used to sit alongside it. */
+	const u32 eth_base[] = {
+		ETH_PORT_0_BASE,
+		ETH_PORT_1_BASE,
+		ETH_PORT_2_BASE,
+		ETH_PORT_3_BASE,
 	};
 
 	for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
@@ -96,30 +97,28 @@ int main()
 		XEth_traffic_gen_Set_force_error(&(eth_pkt_gen[i]),0);
 	}
 
-	// Initialize the AXI Ethernet MACs
-	axi_ethernet[0] = EthFMC_init_axiemac(XPAR_AXI_ETHERNET_0_BASEADDR,mac_ethernet_address);
-	axi_ethernet[1] = EthFMC_init_axiemac(XPAR_AXI_ETHERNET_1_BASEADDR,mac_ethernet_address);
-	axi_ethernet[2] = EthFMC_init_axiemac(XPAR_AXI_ETHERNET_2_BASEADDR,mac_ethernet_address);
-	axi_ethernet[3] = EthFMC_init_axiemac(XPAR_AXI_ETHERNET_3_BASEADDR,mac_ethernet_address);
-
+	// Initialize the MACs
+	for(i = 0; i < 4; i++){
+		EthFMC_init_mac(eth_base[i]);
+	}
 	sleep(1);
 	
 
 	// Phase 1a: kick off all four PHYs
 	for(i = 0; i < 4; i++){
-		EthFMC_phy_start_autoneg(axi_ethernet[i]);
+		EthFMC_phy_start_autoneg(eth_base[i]);
 	}
 
 	// Phase 1b: collect results
 	for(i = 0; i < 4; i++){
-		link_speed[i] = EthFMC_phy_wait_autoneg(axi_ethernet[i]);
+		link_speed[i] = EthFMC_phy_wait_autoneg(eth_base[i]);
 		xil_printf("Ethernet Port %d: %d Mbps\n\r", i, link_speed[i]);
-		EthFMC_set_mac_speed(axi_ethernet[i], link_speed[i]);
+		EthFMC_check_mac_speed(eth_base[i], link_speed[i]);
 	}
 
 	// Phase 2: start all four MACs back to back
 	for(i = 0; i < 4; i++){
-		EthFMC_start_mac(axi_ethernet[i]);
+		EthFMC_start_mac(eth_base[i]);
 	}
 
 	// Let all links finish renegotiating after the last PHY reset
@@ -131,9 +130,13 @@ int main()
 
 
 			// Baseline with the links idle
+			/* Latch all four ports at the same instant. The shadow registers
+			   reset to 0, so without this every counter reads 0 - which looks
+			   exactly like total packet loss. */
+			eth_snapshot();
 			for(p = 0; p < 4; p++){
-				tx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_TXFL_OFFSET);
-				rx_base[p] = XAxiEthernet_ReadReg(eth_mac_baseaddr[p], XAE_RXFL_OFFSET);
+				tx_base[p] = Xil_In32(eth_base[p] + ETH_TX_FRAMES);
+				rx_base[p] = Xil_In32(eth_base[p] + ETH_RX_FRAMES);
 			}
 
 			// Open the measurement window: set the frame size to start traffic
@@ -158,15 +161,28 @@ int main()
 		sleep(1);
 
 		// Read the MAC statistics counters
+		eth_snapshot();
 		for(i = 0; i < 4; i++){
-    		tx_frames[i] = XAxiEthernet_ReadReg(eth_mac_baseaddr[i], XAE_TXFL_OFFSET) - tx_base[i];
-    		rx_frames[i] = XAxiEthernet_ReadReg(eth_mac_baseaddr[i], XAE_RXFL_OFFSET) - rx_base[i];
+    		tx_frames[i] = Xil_In32(eth_base[i] + ETH_TX_FRAMES) - tx_base[i];
+    		rx_frames[i] = Xil_In32(eth_base[i] + ETH_RX_FRAMES) - rx_base[i];
 		}
 
 		/* TAP test results
 		 *   P0 -> TAP port A       P2 <- TAP monitor 1 (A->B)
 		 *   P1 -> TAP port B       P3 <- TAP monitor 2 (B->A)
 		 */
+		/* RGMII receive timing verdict. The input delays in
+		   eth_port_1g_timing.xdc rest on a one bit period offset that closes on
+		   paper but has never been confirmed in silicon. Nonzero here while
+		   frames still arrive means the sample point sits near an eye edge and
+		   will drift out as the board warms. See TIMING-NOTES.md section 5. */
+		for(i = 0; i < 4; i++){
+			u32 bad = Xil_In32(eth_base[i] + ETH_RX_BAD_FCS);
+			if (bad)
+				xil_printf("Port %d: %d frames with bad FCS
+", i, bad);
+		}
+
 		xil_printf("--- frame size %d bytes ---\n\r", (sweep_words[s]*4)+20);
 		xil_printf("                  sent   received       diff\n\r");
 		xil_printf("A->B through %10d %10d %10d\n\r",
