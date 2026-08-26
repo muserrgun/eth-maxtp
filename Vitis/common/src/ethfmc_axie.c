@@ -13,14 +13,77 @@
 
 #include "xparameters.h"
 #include "ethfmc_axie.h"
-#include "stdlib.h"
 #include "board.h"
 
-#ifdef SDT
-#define XAxiEthernet_GetPhysicalInterface(x) XAxiEthernet_Get_Phy_Interface(x)
-#endif
 
 static void __attribute__ ((noinline)) AxiEthernetUtilPhyDelay(unsigned int Seconds);
+
+/* ----------------------------------------------------------------------
+ * Clause 22 MDIO against eth_port_regs.
+ *
+ * MDIO_CMD [4:0] regad [9:5] phyad [10] op (0=write, 1=read) [11] go,
+ * MDIO_DATA [15:0] data [31] busy. 'go' is self clearing; poll busy.
+ *
+ *
+ * A read that returns 0xFFFF means the PHY did not drive the bus.
+ * ---------------------------------------------------------------------- */
+
+#define MDIO_POLL_LIMIT 1000000
+
+static int mdio_wait(u32 base)
+{
+	int limit = MDIO_POLL_LIMIT;
+
+	while ((Xil_In32(base + ETH_MDIO_DATA) & ETH_MDIO_BUSY) && --limit)
+		;
+
+	if (limit == 0) {
+		xil_printf("MDIO timeout at base 0x%08X
+
+", (unsigned)base);
+		return -1;
+	}
+	return 0;
+}
+
+int eth_phy_write(u32 base, u32 phyad, u32 regad, u16 val)
+{
+	if (mdio_wait(base))
+		return -1;
+
+	Xil_Out32(base + ETH_MDIO_DATA, val);
+	Xil_Out32(base + ETH_MDIO_CMD,
+	          ((regad & 0x1F) << ETH_MDIO_REGAD_SHIFT) |
+	          ((phyad & 0x1F) << ETH_MDIO_PHYAD_SHIFT) |
+	          ETH_MDIO_GO);
+
+	return mdio_wait(base);
+}
+
+int eth_phy_read(u32 base, u32 phyad, u32 regad, u16 *val)
+{
+	if (mdio_wait(base))
+		return -1;
+
+	Xil_Out32(base + ETH_MDIO_CMD,
+	          ((regad & 0x1F) << ETH_MDIO_REGAD_SHIFT) |
+	          ((phyad & 0x1F) << ETH_MDIO_PHYAD_SHIFT) |
+	          ETH_MDIO_OP_READ | ETH_MDIO_GO);
+
+	if (mdio_wait(base))
+		return -1;
+
+	*val = (u16)(Xil_In32(base + ETH_MDIO_DATA) & 0xFFFF);
+	return 0;
+}
+
+/* Latch all four ports' counters at the same instant. Software must call
+   this before reading them - see eth_port_1g.h. */
+void eth_snapshot(void)
+{
+	Xil_Out32(SNAPSHOT_GPIO_BASE + SNAPSHOT_GPIO_DATA, 1);
+	Xil_Out32(SNAPSHOT_GPIO_BASE + SNAPSHOT_GPIO_DATA, 0);
+}
 
 /* ----------------------------------------------------------------------
  * Autonegotiation is split into two halves so that all four ports can be
@@ -38,7 +101,7 @@ static void __attribute__ ((noinline)) AxiEthernetUtilPhyDelay(unsigned int Seco
  * link of the port it is cabled to, forcing that port to renegotiate.
  * ---------------------------------------------------------------------- */
 
-void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp)
+void EthFMC_phy_start_autoneg(u32 base)
 {
 	u32 phy_addr = 0;
 	u16 phy_identifier;
@@ -46,8 +109,8 @@ void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp)
 	u16 control;
 
 	/* Get the PHY Identifier and Model number */
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, 2, &phy_identifier);
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, 3, &phy_model);
+	eth_phy_read(base, phy_addr, 2, &phy_identifier);
+	eth_phy_read(base, phy_addr, 3, &phy_model);
 	phy_model = phy_model & PHY_MODEL_NUM_MASK;
 
 	/* The PHY ID for Marvel is 0x0141 */
@@ -57,61 +120,60 @@ void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp)
 	if(phy_model != 0x01D0)
 		xil_printf("PHY model is NOT 88E1510: 0x%04X\n\r",phy_model);
 
-	/* RGMII with both TX and RX internal delays enabled (the default for 88E1510)
-	   Note that the Vivado designs for "max throughput" example designs all contain a
-	   constraint that disables the TX clock skew in the FPGA, hence the need to enable
-	   the TX clock skew in the PHY (done in the lines below).
-	   For explanation: http://ethernetfmc.com/rgmii-interface-timing-considerations/ 
-	   DOES NOT APPLY TO ULTRASCALE DESIGNS */
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_CONTROL_REG_MAC, &control);
-	// Ultrascale designs implement TX clock skew in the FPGA
-#ifdef PLATFORM_ZYNQMP
-  control &= ~(IEEE_RGMII_TX_CLOCK_DELAYED_MASK);
-#else
-  control |= IEEE_RGMII_TX_CLOCK_DELAYED_MASK;
-#endif
-	control |= IEEE_RGMII_RX_CLOCK_DELAYED_MASK;
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_CONTROL_REG_MAC, control);
+	/* RGMII clock skew: the FPGA does TX, the PHY does RX.
+         eth_port_1g forwards TXC from the clk_wiz 90 degree output
+         (USE_CLK90 = "TRUE"), so the PHY's own TX delay must be OFF -
+         both would be ~4 ns on a 4 ns bit period, a full bit out.
+         RX has no adjustable delay in the FPGA (rgmii_phy_if has no
+         IDELAY), so the PHY must supply that one.
+         Set both explicitly rather than relying on the 88E1510 default,
+         which has TX enabled. */
+	eth_phy_write(base, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
+	eth_phy_read(base, phy_addr, IEEE_CONTROL_REG_MAC, &control);
 
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
+	control &= ~(IEEE_RGMII_TX_CLOCK_DELAYED_MASK);
+    control |=   IEEE_RGMII_RX_CLOCK_DELAYED_MASK;
 
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, &control);
+	eth_phy_write(base, phy_addr, IEEE_CONTROL_REG_MAC, control);
+
+	eth_phy_write(base, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
+
+	eth_phy_read(base, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, &control);
 	control |= IEEE_ASYMMETRIC_PAUSE_MASK;
 	control |= IEEE_PAUSE_MASK;
 	control |= ADVERTISE_100;
 	control |= ADVERTISE_10;
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, control);
+	eth_phy_write(base, phy_addr, IEEE_AUTONEGO_ADVERTISE_REG, control);
 
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_1000_ADVERTISE_REG_OFFSET,
+	eth_phy_read(base, phy_addr, IEEE_1000_ADVERTISE_REG_OFFSET,
 																	&control);
 	control |= ADVERTISE_1000;
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_1000_ADVERTISE_REG_OFFSET,
+	eth_phy_write(base, phy_addr, IEEE_1000_ADVERTISE_REG_OFFSET,
 																	control);
 
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,
+	eth_phy_write(base, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 0);
+	eth_phy_read(base, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,
 																&control);
 	control |= (7 << 12);	/* max number of gigabit attempts */
 	control |= (1 << 11);	/* enable downshift */
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,
+	eth_phy_write(base, phy_addr, IEEE_COPPER_SPECIFIC_CONTROL_REG,
 																control);
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+	eth_phy_read(base, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
 	control |= IEEE_CTRL_AUTONEGOTIATE_ENABLE;
 	control |= IEEE_STAT_AUTONEGOTIATE_RESTART;
 
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
+	eth_phy_write(base, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
 
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+	eth_phy_read(base, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
 	control |= IEEE_CTRL_RESET_MASK;
-	XAxiEthernet_PhyWrite(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
+	eth_phy_write(base, phy_addr, IEEE_CONTROL_REG_OFFSET, control);
 
 	/* Return without waiting - the caller kicks off the other ports next,
 	   then collects every result with EthFMC_phy_wait_autoneg(). */
 }
 
-unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp)
+unsigned EthFMC_phy_wait_autoneg(u32 base)
 {
 	u16 temp;
 	u32 phy_addr = 0;
@@ -121,26 +183,26 @@ unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp)
 
 	/* Wait for the software reset issued by _start_autoneg() to clear */
 	while (1) {
-		XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
+		eth_phy_read(base, phy_addr, IEEE_CONTROL_REG_OFFSET, &control);
 		if (control & IEEE_CTRL_RESET_MASK)
 			continue;
 		else
 			break;
 	}
 
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
+	eth_phy_read(base, phy_addr, IEEE_STATUS_REG_OFFSET, &status);
 	while ( !(status & IEEE_STAT_AUTONEGOTIATE_COMPLETE) ) {
 		AxiEthernetUtilPhyDelay(1);
-		XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_COPPER_SPECIFIC_STATUS_REG_2,
+		eth_phy_read(base, phy_addr, IEEE_COPPER_SPECIFIC_STATUS_REG_2,
 																	&temp);
 		if (temp & IEEE_AUTONEG_ERROR_MASK) {
 			xil_printf("Auto negotiation error \r\n");
 		}
-		XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_STATUS_REG_OFFSET,
+		eth_phy_read(base, phy_addr, IEEE_STATUS_REG_OFFSET,
 																&status);
 		}
 
-	XAxiEthernet_PhyRead(xaxiemacp, phy_addr, IEEE_SPECIFIC_STATUS_REG, &partner_capabilities);
+	eth_phy_read(base, phy_addr, IEEE_SPECIFIC_STATUS_REG, &partner_capabilities);
 
 	if ( ((partner_capabilities >> 14) & 3) == 2)/* 1000Mbps */
 		return 1000;
@@ -150,82 +212,35 @@ unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp)
 		return 10;
 }
 
-XAxiEthernet_Config *EthFMC_xaxiemac_lookup_config(unsigned mac_base)
+/* The AXI Ethernet 
+   eth_port_1g does not filter, so every frame is passed up. That is what 
+   XAE_PROMISC_OPTION was configuring before. */
+void EthFMC_init_mac(u32 base)
 {
-	extern XAxiEthernet_Config XAxiEthernet_ConfigTable[];
-	XAxiEthernet_Config *CfgPtr = NULL;
-	int i;
+	Xil_Out32(base + ETH_IFG, ETH_IFG_DEFAULT);
+	Xil_Out32(base + ETH_CONTROL, ETH_CTRL_PHY_RST_N);
+}
 
-	for (i = 0; i < XPAR_XAXIETHERNET_NUM_INSTANCES; i++) {
-		if (XAxiEthernet_ConfigTable[i].BaseAddress == mac_base) {
-			CfgPtr = &XAxiEthernet_ConfigTable[i];
-			break;
-		}
+/* The MAC measures the RX clock and switches between GMII and MII by itself, 
+   so there is nothing to set.  */
+void EthFMC_check_mac_speed(u32 base, unsigned link_speed)
+{
+	u32 speed = Xil_In32(base + ETH_STATUS) & ETH_STATUS_SPEED_MASK;
+	unsigned mac_mbps;
+
+	switch (speed) {
+	case ETH_STATUS_SPEED_1000: mac_mbps = 1000; break;
+	case ETH_STATUS_SPEED_100:  mac_mbps = 100;  break;
+	default:                    mac_mbps = 10;   break;
 	}
-
-	return (CfgPtr);
 }
 
-
-
-
-XAxiEthernet *EthFMC_init_axiemac(unsigned mac_address,unsigned char *mac_eth_addr)
+int EthFMC_start_mac(u32 base)
 {
-	unsigned options;
-	XAxiEthernet *axi_ethernet;
-	XAxiEthernet_Config *mac_config;
+	u32 control = Xil_In32(base + ETH_CONTROL);
 
-	axi_ethernet = malloc(sizeof(XAxiEthernet));
-	if (axi_ethernet == NULL) {
-		xil_printf("EthFMC_low_level_init: out of memory\r\n");
-		return NULL;
-	}
-
-	/* obtain config of this emac */
-	mac_config = EthFMC_xaxiemac_lookup_config(mac_address);
-
-	XAxiEthernet_CfgInitialize(axi_ethernet, mac_config, mac_config->BaseAddress);
-
-	options = XAxiEthernet_GetOptions(axi_ethernet);
-	// Disable recognize flow control frames
-	options &= ~XAE_FLOW_CONTROL_OPTION;
-	//options |= XAE_FLOW_CONTROL_OPTION;
-#ifdef USE_JUMBO_FRAMES
-	options |= XAE_JUMBO_OPTION;
-#endif
-	options |= XAE_TRANSMITTER_ENABLE_OPTION;
-	options |= XAE_RECEIVER_ENABLE_OPTION;
-	// Disable FCS strip
-	options &= ~XAE_FCS_STRIP_OPTION;
-	// Disable FCS insert (we have included it in the frame)
-	options&= ~XAE_FCS_INSERT_OPTION;
-	//options |= XAE_FCS_INSERT_OPTION;
-	options |= XAE_MULTICAST_OPTION;
-	// Using promiscuous option to disable mac address filtering
-	// and allow the loopback to function.
-	options |= XAE_PROMISC_OPTION;
-	XAxiEthernet_SetOptions(axi_ethernet, options);
-	XAxiEthernet_ClearOptions(axi_ethernet, ~options);
-
-	/* set mac address */
-	XAxiEthernet_SetMacAddress(axi_ethernet, mac_eth_addr);
-  
-  return axi_ethernet;
-}
-
-// Phase 1: PHY setup only — MAC stays quiet
-/* Phase 1b helper: apply the negotiated speed to the MAC. Kept separate
-   from the PHY wait so all four ports can be waited on first. */
-void EthFMC_set_mac_speed(XAxiEthernet *axi_ethernet, unsigned link_speed)
-{
-    XAxiEthernet_SetOperatingSpeed(axi_ethernet, link_speed);
-}
-
-// Phase 3: turn the MAC on
-int EthFMC_start_mac(XAxiEthernet *axi_ethernet)
-{
-	XAxiEthernet_SetOptions(axi_ethernet, XAE_TRANSMITTER_ENABLE_OPTION);
-	XAxiEthernet_IntEnable(axi_ethernet, XAE_INT_RECV_ERROR_MASK);
+	control |= ETH_CTRL_TX_ENABLE | ETH_CTRL_RX_ENABLE | ETH_CTRL_PHY_RST_N;
+	Xil_Out32(base + ETH_CONTROL, control);
 	return 0;
 }
 

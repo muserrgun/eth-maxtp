@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#include "xaxiethernet.h"
+#include "eth_port_1g.h"
 /* Advertisement control register. */
 #define ADVERTISE_10HALF	0x0020  /* Try for 10mbps half-duplex  */
 #define ADVERTISE_1000XFULL	0x0020  /* Try for 1000BASE-X full-duplex */
@@ -80,12 +80,15 @@ extern "C" {
 #define PHY_88E1111_RGMII_RX_CLOCK_DELAYED_MASK	0x0080
 
 
-XAxiEthernet_Config *EthFMC_xaxiemac_lookup_config(unsigned mac_base);
-XAxiEthernet *EthFMC_init_axiemac(unsigned mac_address,unsigned char *mac_eth_addr);
-void EthFMC_phy_start_autoneg(XAxiEthernet *xaxiemacp);
-unsigned EthFMC_phy_wait_autoneg(XAxiEthernet *xaxiemacp);
-void EthFMC_set_mac_speed(XAxiEthernet *axi_ethernet, unsigned link_speed);
-int EthFMC_start_mac(XAxiEthernet *axi_ethernet);
+/* The handle is the port's AXI-Lite base address. There is no driver struct
+   to allocate the hardware holds it all in registers. See ETH_PORT_n_BASE in 
+   eth_port_1g.h. */
+
+void     EthFMC_init_mac(u32 base);
+void     EthFMC_phy_start_autoneg(u32 base);
+unsigned EthFMC_phy_wait_autoneg(u32 base);
+void     EthFMC_check_mac_speed(u32 base, unsigned link_speed);
+int      EthFMC_start_mac(u32 base);
 
 #ifdef __cplusplus
 }
