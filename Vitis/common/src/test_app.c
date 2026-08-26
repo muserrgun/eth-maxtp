@@ -13,17 +13,9 @@
  *   P0 -> TAP port A     P2 <- TAP monitor 1 (A->B)
  *   P1 -> TAP port B     P3 <- TAP monitor 2 (B->A)
  *
- * Each round stops the traffic and reads the MAC frame counters,
- * runs traffic for a while, then stops and reads them again. With
- * the traffic stopped no frame is left on the wire, so the sent and
- * received counts can be compared exactly.
- *
- * The test passes when each port received exactly as many frames as
- * were sent to it.
  */
 
 #include "xparameters.h"
-#include <stdio.h>
 #include "xil_types.h"
 #include "ethfmc_axie.h"
 #include "xeth_traffic_gen.h"
@@ -53,10 +45,6 @@ int main()
 	xil_printf("###### Ethernet Traffic Generator ########\n\r");
 	xil_printf("##########################################\n\r");
 	xil_printf("\n\r");
-
-	/* the mac address of the board. this should be unique per board */
-	unsigned char mac_ethernet_address[] =
-	{ 0x00, 0x0a, 0x35, 0x00, 0x01, 0x02 };
 
 	// Initialize Ethernet Traffic Generators
 	UINTPTR eth_tg_baseaddr[] = {
