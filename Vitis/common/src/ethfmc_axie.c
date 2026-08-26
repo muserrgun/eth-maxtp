@@ -38,9 +38,7 @@ static int mdio_wait(u32 base)
 		;
 
 	if (limit == 0) {
-		xil_printf("MDIO timeout at base 0x%08X
-
-", (unsigned)base);
+		xil_printf("MDIO timeout at base 0x%08X\n\r", (unsigned)base);
 		return -1;
 	}
 	return 0;
@@ -233,6 +231,9 @@ void EthFMC_check_mac_speed(u32 base, unsigned link_speed)
 	case ETH_STATUS_SPEED_100:  mac_mbps = 100;  break;
 	default:                    mac_mbps = 10;   break;
 	}
+	if (mac_mbps != link_speed)
+    	xil_printf("WARNING: port 0x%08X PHY says %d Mbps, MAC says %d Mbps\n\r",
+               	  (unsigned)base, link_speed, mac_mbps);
 }
 
 int EthFMC_start_mac(u32 base)

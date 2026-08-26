@@ -179,8 +179,7 @@ int main()
 		for(i = 0; i < 4; i++){
 			u32 bad = Xil_In32(eth_base[i] + ETH_RX_BAD_FCS);
 			if (bad)
-				xil_printf("Port %d: %d frames with bad FCS
-", i, bad);
+				xil_printf("Port %d: %d frames with bad FCS\n\r", i, bad);
 		}
 
 		xil_printf("--- frame size %d bytes ---\n\r", (sweep_words[s]*4)+20);
