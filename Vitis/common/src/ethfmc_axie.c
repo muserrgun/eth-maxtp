@@ -118,19 +118,18 @@ void EthFMC_phy_start_autoneg(u32 base)
 	if(phy_model != 0x01D0)
 		xil_printf("PHY model is NOT 88E1510: 0x%04X\n\r",phy_model);
 
-	/* RGMII clock skew: the FPGA does TX, the PHY does RX.
-         eth_port_1g forwards TXC from the clk_wiz 90 degree output
-         (USE_CLK90 = "TRUE"), so the PHY's own TX delay must be OFF -
-         both would be ~4 ns on a 4 ns bit period, a full bit out.
-         RX has no adjustable delay in the FPGA (rgmii_phy_if has no
-         IDELAY), so the PHY must supply that one.
-         Set both explicitly rather than relying on the 88E1510 default,
-         which has TX enabled. */
+	/* RGMII clock skew: the FPGA supplies both.
+	TX - eth_port_1g forwards TXC from the clk_wiz 90 degree output
+	(USE_CLK90 = "TRUE"). RX - the recovered clock reaches the IDDR 
+	2.46 ns after the data reaches D (BUFIO insertion, see 
+	TIMING-NOTES section 2), which is already the shift RGMII needs.
+	The PHY adding its own on top puts the sample ~0.34 ns outside 
+	the eye. Both PHY delays OFF. */
 	eth_phy_write(base, phy_addr, IEEE_PAGE_ADDRESS_REGISTER, 2);
 	eth_phy_read(base, phy_addr, IEEE_CONTROL_REG_MAC, &control);
 
 	control &= ~(IEEE_RGMII_TX_CLOCK_DELAYED_MASK);
-    control |=   IEEE_RGMII_RX_CLOCK_DELAYED_MASK;
+    control &= ~(IEEE_RGMII_RX_CLOCK_DELAYED_MASK);
 
 	eth_phy_write(base, phy_addr, IEEE_CONTROL_REG_MAC, control);
 
