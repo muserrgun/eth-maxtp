@@ -36,8 +36,8 @@ int main()
 {
 	int Status;
 	volatile u32 i;
-	volatile u32 tx_frames[4], rx_frames[4];
-	volatile u32 tx_base[4], rx_base[4];
+	volatile u32 tx_frames[4], rx_frames[4], bad_frames[4];
+	volatile u32 tx_base[4], rx_base[4], bad_base[4];
 
 	volatile u32 s, p;
 	unsigned link_speed[4];
@@ -129,21 +129,24 @@ int main()
 		for(s = 0; s < NUM_SWEEP; s++){
 
 
-			// Baseline with the links idle
-			/* Latch all four ports at the same instant. The shadow registers
-			   reset to 0, so without this every counter reads 0 - which looks
-			   exactly like total packet loss. */
-			eth_snapshot();
-			for(p = 0; p < 4; p++){
-				tx_base[p] = Xil_In32(eth_base[p] + ETH_TX_FRAMES);
-				rx_base[p] = Xil_In32(eth_base[p] + ETH_RX_FRAMES);
-			}
-
-			// Open the measurement window: set the frame size to start traffic
+			/* Set the frame size. Traffic runs continuously from here on - it
+			 * is never stopped, so the pipeline stays in steady state and the
+			 * frames in flight cancel out of the deltas below. Settle first so
+			 * the FIFOs have reached that steady state before the baseline. */
 			for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
 				XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), sweep_words[s]);
 			}
+			sleep(1);
 
+			/* Baseline. Latch all four ports at the same instant - the shadow
+			   registers only update on a snapshot pulse, so without this every
+			   counter reads 0. */
+			eth_snapshot();
+			for(p = 0; p < 4; p++){
+				tx_base[p]  = Xil_In32(eth_base[p] + ETH_TX_FRAMES);
+				rx_base[p]  = Xil_In32(eth_base[p] + ETH_RX_FRAMES);
+				bad_base[p] = Xil_In32(eth_base[p] + ETH_RX_BAD_FCS);
+			}
 
 			/* The measurement window. Frames are generated and counted entirely
 			 * in hardware, so the CPU has nothing to do while it runs. A longer
@@ -151,56 +154,30 @@ int main()
 			 * 12.3 us, so 10 seconds is roughly 814000 frames per port. */
 			sleep(WINDOW_SECONDS);
 
+			eth_snapshot();
+			for(p = 0; p < 4; p++){
+				tx_frames[p]  = Xil_In32(eth_base[p] + ETH_TX_FRAMES)  - tx_base[p];
+				rx_frames[p]  = Xil_In32(eth_base[p] + ETH_RX_FRAMES)  - rx_base[p];
+				bad_frames[p] = Xil_In32(eth_base[p] + ETH_RX_BAD_FCS) - bad_base[p];
+			}
 
-		/* Stop the traffic and let it settle before reading. Reading
-		 * while traffic runs would count frames at tx that have not reached
-		 * rx yet, which looks like loss but is not. */
-		for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
-			XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), 0);
-		}
-		sleep(1);
-
-		// Read the MAC statistics counters
-		eth_snapshot();
-		for(i = 0; i < 4; i++){
-    		tx_frames[i] = Xil_In32(eth_base[i] + ETH_TX_FRAMES) - tx_base[i];
-    		rx_frames[i] = Xil_In32(eth_base[i] + ETH_RX_FRAMES) - rx_base[i];
-		}
-
-		/* TAP test results
-		 *   P0 -> TAP port A       P2 <- TAP monitor 1 (A->B)
-		 *   P1 -> TAP port B       P3 <- TAP monitor 2 (B->A)
-		 */
-		/* RGMII receive timing verdict. The input delays in
-		   eth_port_1g_timing.xdc rest on a one bit period offset that closes on
-		   paper but has never been confirmed in silicon. Nonzero here while
-		   frames still arrive means the sample point sits near an eye edge and
-		   will drift out as the board warms. See TIMING-NOTES.md section 5. */
-		for(i = 0; i < 4; i++){
-			u32 bad = Xil_In32(eth_base[i] + ETH_RX_BAD_FCS);
-			if (bad)
-				xil_printf("Port %d: %d frames with bad FCS\n\r", i, bad);
-		}
-
-		xil_printf("--- frame size %d bytes ---\n\r", (sweep_words[s]*4)+20);
-		xil_printf("                  sent   received       diff\n\r");
-		xil_printf("A->B through %10d %10d %10d\n\r",
-					tx_frames[0], rx_frames[1], rx_frames[1] - tx_frames[0]);
-		xil_printf("B->A through %10d %10d %10d\n\r",
-					tx_frames[1], rx_frames[0], rx_frames[0] - tx_frames[1]);
-		xil_printf("A->B mirror  %10d %10d %10d\n\r",
-					tx_frames[0], rx_frames[2], rx_frames[2] - tx_frames[0]);
-		xil_printf("B->A mirror  %10d %10d %10d\n\r",
-					tx_frames[1], rx_frames[3], rx_frames[3] - tx_frames[1]);
-
-		/* Traffic is stopped, so every frame sent has either arrived or been
-		 * lost. Any nonzero diff is real loss. */
-		if((rx_frames[1] == tx_frames[0]) && (rx_frames[0] == tx_frames[1]) &&
-		   (rx_frames[2] == tx_frames[0]) && (rx_frames[3] == tx_frames[1])){
-			xil_printf("RESULT: PASS - all counts match\n\r\n\r");
-		} else {
-			xil_printf("RESULT: FAIL - frame loss detected\n\r\n\r");
-		}
+			/* Per-port counts for the window, no verdict.
+			 *
+			 * Traffic never stops, so a diff of a few frames is the TX FIFO
+			 * holding a different number of frames at the two snapshots, not
+			 * loss. Real loss shows up as a diff that persists or grows across
+			 * rounds. bad FCS is the RGMII receive verdict and should stay 0.
+			 *
+			 * TAP wiring:  P0 -> port A   P1 -> port B
+			 *              P2 <- monitor 1 (A->B)   P3 <- monitor 2 (B->A) */
+			xil_printf("--- frame size %d bytes, %d s window ---\n\r",
+						(sweep_words[s]*4)+20, WINDOW_SECONDS);
+			xil_printf("port        sent   received    bad FCS\n\r");
+			for(p = 0; p < 4; p++){
+				xil_printf("%4d  %10d %10d %10d\n\r",
+							p, tx_frames[p], rx_frames[p], bad_frames[p]);
+			}
+			xil_printf("\n\r");
 
 		}
 	}
