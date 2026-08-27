@@ -122,18 +122,10 @@ int main()
 		for(s = 0; s < NUM_SWEEP; s++){
 
 
-			/* Set the frame size. Traffic runs continuously from here on - it
-			 * is never stopped, so the pipeline stays in steady state and the
-			 * frames in flight cancel out of the deltas below. Settle first so
-			 * the FIFOs have reached that steady state before the baseline. */
-			for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
-				XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), sweep_words[s]);
-			}
-			sleep(1);
-
-			/* Baseline. Latch all four ports at the same instant - the shadow
-			   registers only update on a snapshot pulse, so without this every
-			   counter reads 0. */
+			/* Baseline, taken before traffic starts so nothing is in flight.
+			 * The pipeline is empty here: on the first pass traffic has never
+			 * run, and on every later pass the drain at the end of the previous
+			 * pass emptied it. */
 			eth_snapshot();
 			for(p = 0; p < 4; p++){
 				tx_base[p]  = Xil_In32(eth_base[p] + ETH_TX_FRAMES);
@@ -141,12 +133,22 @@ int main()
 				bad_base[p] = Xil_In32(eth_base[p] + ETH_RX_BAD_FCS);
 			}
 
-			/* The measurement window. Frames are generated and counted entirely
-			 * in hardware, so the CPU has nothing to do while it runs. A longer
-			 * window tests more frames: at 1 Gbps a 1516 byte frame takes about
-			 * 12.3 us, so 10 seconds is roughly 814000 frames per port. */
+			/* Open the measurement window: set the frame size to start traffic */
+			for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
+				XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), sweep_words[s]);
+			}
+			xil_printf("Traffic is running....\n\r");
 			sleep(WINDOW_SECONDS);
 
+			/* Stop the traffic and let it settle before reading. Reading
+			*  while traffic runs would count frames at tx that have not reached
+			*  rx yet, which looks like loss but is not. */
+			for(i = 0; i < XPAR_XETH_TRAFFIC_GEN_NUM_INSTANCES; i++){
+				XEth_traffic_gen_Set_pkt_len(&(eth_pkt_gen[i]), 0);
+			}
+			sleep(1);
+
+			/* Read the frame counters*/
 			eth_snapshot();
 			for(p = 0; p < 4; p++){
 				tx_frames[p]  = Xil_In32(eth_base[p] + ETH_TX_FRAMES)  - tx_base[p];
@@ -171,7 +173,6 @@ int main()
 							p, tx_frames[p], rx_frames[p], bad_frames[p]);
 			}
 			xil_printf("\n\r");
-
 		}
 	}
 	
