@@ -35,7 +35,8 @@ int main()
 	unsigned link_speed[4];
 	/* Frame sizes to sweep, in payload words. Frame bytes = words*4 + 20.
 	 * Valid range is 12 (48 bytes + 2 pad) to 374 (1496 bytes + 2 pad). */
-	const u32 sweep_words[] = {373};   /* 374 -> 1520 bytes: the MAC appends its own FCS */
+	/* 68, 128, 256, 512, 1024, 1512 bytes on the wire */
+	const u32 sweep_words[] = {12, 27, 59, 123, 251, 373};
 	#define NUM_SWEEP (sizeof(sweep_words)/sizeof(sweep_words[0]))
 	// How long traffic runs per measurement, in seconds
 	#define WINDOW_SECONDS 10
@@ -53,6 +54,9 @@ int main()
 		XPAR_XETH_TRAFFIC_GEN_2_BASEADDR,
 		XPAR_XETH_TRAFFIC_GEN_3_BASEADDR,
 	};
+
+	/* P0/P1 drive the TAP; P2/P3 are monitor outputs and are receive only. */
+	const int port_tx[4] = { 1, 1, 0, 0 };
 
 	/* The handle is the base address - eth_port_1g has no driver struct and
 	   no per-port software state. Replaces the XAxiEthernet * array and the
@@ -106,8 +110,9 @@ int main()
 
 	// Phase 2: start all four MACs back to back
 	for(i = 0; i < 4; i++){
-		EthFMC_start_mac(eth_base[i]);
+		EthFMC_start_mac(eth_base[i], port_tx[i]);
 	}
+
 
 	// Let all links finish renegotiating after the last PHY reset
 	sleep(2);
@@ -156,8 +161,8 @@ int main()
 			 * loss. Real loss shows up as a diff that persists or grows across
 			 * rounds. bad FCS is the RGMII receive verdict and should stay 0.
 			 *
-			 * TAP wiring:  P0 -> port A   P1 -> port B
-			 *              P2 <- monitor 1 (A->B)   P3 <- monitor 2 (B->A) */
+			 * TAP wiring:  P0 <-> TAP port A     P2 <- TAP monitor 1 (A->B)   RX only
+			 *              P1 <-> TAP port B     P3 <- TAP monitor 2 (B->A)   RX only */
 			xil_printf("--- frame size %d bytes, %d s window ---\n\r",
 						(sweep_words[s]*4)+20, WINDOW_SECONDS);
 			xil_printf("port        sent   received    bad FCS\n\r");

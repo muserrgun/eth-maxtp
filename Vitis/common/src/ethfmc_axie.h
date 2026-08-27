@@ -88,7 +88,7 @@ void     EthFMC_init_mac(u32 base);
 void     EthFMC_phy_start_autoneg(u32 base);
 unsigned EthFMC_phy_wait_autoneg(u32 base);
 void     EthFMC_check_mac_speed(u32 base, unsigned link_speed);
-int      EthFMC_start_mac(u32 base);
+int      EthFMC_start_mac(u32 base, int tx_enable);
 
 #ifdef __cplusplus
 }

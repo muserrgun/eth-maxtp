@@ -224,11 +224,15 @@ void EthFMC_check_mac_speed(u32 base, unsigned link_speed)
                	  (unsigned)base, link_speed, mac_mbps);
 }
 
-int EthFMC_start_mac(u32 base)
+int EthFMC_start_mac(u32 base, int tx_enable)
 {
 	u32 control = Xil_In32(base + ETH_CONTROL);
 
-	control |= ETH_CTRL_TX_ENABLE | ETH_CTRL_RX_ENABLE | ETH_CTRL_PHY_RST_N;
+	control |= ETH_CTRL_RX_ENABLE | ETH_CTRL_PHY_RST_N;
+	if (tx_enable)
+		control |= ETH_CTRL_TX_ENABLE;
+	else
+		control &= ~ETH_CTRL_TX_ENABLE;
 	Xil_Out32(base + ETH_CONTROL, control);
 	return 0;
 }
